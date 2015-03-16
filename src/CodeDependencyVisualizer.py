@@ -6,11 +6,12 @@ import os
 import logging
 import argparse
 import fnmatch
-
+import re
 from DotGenerator import *
 
 index = clang.cindex.Index.create()
 dotGenerator = DotGenerator()
+
 
 
 def findFilesInDir(rootDir, patterns):
@@ -35,13 +36,65 @@ def processClassField(cursor):
         for cc in fieldChilds:
             if cc.kind == clang.cindex.CursorKind.TEMPLATE_REF:
                 type = cc.spelling
-            elif cc.kind == clang.cindex.CursorKind.TYPE_REF:
+            else:
+            #elif cc.kind == clang.cindex.CursorKind.TYPE_REF:
                 type = cursor.type.spelling
     name = cursor.spelling
     return name, type
 
+#def processTemplate(type, template):
+#    #TODO fix this to expand the template
+#    #strip the < and >
+#    templateArgs.append(template[1:-1])
+#    templateArgs = []
+#    processTemplateClass(type, templateArgs)
 
-def processClassMemberDeclaration(umlClass, cursor):
+#def processTemplateTypes(type, templates):
+#    if "<" not in type:
+#        return
+#    logging.info('type:' + type + "\n")
+#    template = type[type.find("<"):];
+#    processTemplate(type, template)
+#    logging.info('typename:' + template + "\n")
+#    return
+
+def processTemplateTypes(type):
+    types = []
+    logging.info('processing type:\'' + type + "\'\n")
+    processTemplate(type, types, 0)
+    for t in types:
+        logging.info("found:"+t+"\n")
+
+    processTemplateClass(type, types[1:])
+
+
+def processTemplate(type, types, depth):
+    #find first open
+    #find last close
+    #find first comma
+    types.append("")
+    index = len(types)-1
+    i = 0
+    r = i
+    for c in type:
+        i= i +1
+        types[index] = types[index] + c
+        logging.info('building type:\'' + types[index] + "\'\n")
+        if r <= i:
+            if len(types[index]) == 1  and c == " ":
+                types[index] = ""
+            if c == "<":
+                r = i + processTemplate(type[i:], types, depth +1)
+            elif c == ",":
+                types[index]=types[index][:-1]
+                types.append("")
+                index = index +1
+            elif c == ">":
+                types[index]=types[index][:-1]
+                return i+1
+
+        
+def processClassMemberDeclaration(umlClass, cursor, templates):
     """ Processes a cursor corresponding to a class member declaration and
     appends the extracted information to the given umlClass """
     if cursor.kind == clang.cindex.CursorKind.CXX_BASE_SPECIFIER:
@@ -52,6 +105,7 @@ def processClassMemberDeclaration(umlClass, cursor):
                 umlClass.parents.append(baseClass.type.spelling)
     elif cursor.kind == clang.cindex.CursorKind.FIELD_DECL:  # non static data member
         name, type = processClassField(cursor)
+        processTemplateTypes(type)
         if name is not None and type is not None:
             # clang < 3.5: needs patched cindex.py to have
             # clang.cindex.AccessSpecifier available:
@@ -83,7 +137,26 @@ def processClassMemberDeclaration(umlClass, cursor):
             umlClass.protectedMethods.append((returnType, cursor.spelling, argumentTypes))
 
 
-def processClass(cursor, inclusionConfig):
+def processTemplateClass(templatename, templateArgs):
+    """ Processes an ast node that is a class. """
+    umlClass = UmlClass()  # umlClass is the datastructure for the DotGenerator
+                           # that stores the necessary information about a single class.
+                           # We extract this information from the clang ast hereafter ...
+    umlClass.fqn = templatename
+
+    i = 0;
+    for templateArg in templateArgs:
+        # process member variables and methods declarations
+        umlClass.privateFields.append(("templateArg" + str(i), templateArg))
+        i = i + 1
+
+    dotGenerator.addClass(umlClass)
+
+def stripNamespace(name):
+    return re.sub(".*\:\:","",name)
+
+
+def processClass(cursor, inclusionConfig, templates):
     """ Processes an ast node that is a class. """
     umlClass = UmlClass()  # umlClass is the datastructure for the DotGenerator
                            # that stores the necessary information about a single class.
@@ -91,14 +164,17 @@ def processClass(cursor, inclusionConfig):
     if cursor.kind == clang.cindex.CursorKind.CLASS_TEMPLATE:
         # process declarations like:
         #   template <typename T> class MyClass
+        #TODO store template
+        logging.info('adding template type:\'' + cursor.spelling + "\'\n")
+        templates[cursor.spelling] = cursor
         umlClass.fqn = cursor.spelling
+        return
     else:
         # process declarations like:
         #   class MyClass ...
         #   struct MyStruct ...
         umlClass.fqn = cursor.type.spelling  # the fully qualified name
 
-    import re
     if (inclusionConfig['excludeClasses'] and
             re.match(inclusionConfig['excludeClasses'], umlClass.fqn)):
         return
@@ -106,23 +182,25 @@ def processClass(cursor, inclusionConfig):
     if (inclusionConfig['includeClasses'] and not
             re.match(inclusionConfig['includeClasses'], umlClass.fqn)):
         return
+    
+    umlClass.fqn = stripNamespace(umlClass.fqn)
 
     for c in cursor.get_children():
         # process member variables and methods declarations
-        processClassMemberDeclaration(umlClass, c)
+        processClassMemberDeclaration(umlClass, c, templates)
 
     dotGenerator.addClass(umlClass)
 
 
-def traverseAst(cursor, inclusionConfig):
+def traverseAst(cursor, inclusionConfig, templates):
     if (cursor.kind == clang.cindex.CursorKind.CLASS_DECL
             or cursor.kind == clang.cindex.CursorKind.STRUCT_DECL
             or cursor.kind == clang.cindex.CursorKind.CLASS_TEMPLATE):
         # if the current cursor is a class, class template or struct declaration,
         # we process it further ...
-        processClass(cursor, inclusionConfig)
+        processClass(cursor, inclusionConfig, templates)
     for child_node in cursor.get_children():
-        traverseAst(child_node, inclusionConfig)
+        traverseAst(child_node, inclusionConfig, templates)
 
 
 def parseTranslationUnit(filePath, includeDirs, inclusionConfig):
@@ -131,7 +209,8 @@ def parseTranslationUnit(filePath, includeDirs, inclusionConfig):
     for diagnostic in tu.diagnostics:
         logging.debug(diagnostic)
     logging.info('Translation unit:' + tu.spelling + "\n")
-    traverseAst(tu.cursor, inclusionConfig)
+    templates = {}
+    traverseAst(tu.cursor, inclusionConfig, templates)
 
 
 if __name__ == "__main__":
