@@ -9,7 +9,7 @@ Dependencies
 ------------
 - python 2.7
 - clang version 3.5
-- graphvitz (for the dot tool) to be able to transform the generated dot file to an image
+- graphviz (for the dot tool) to be able to transform the generated dot file to an image
 
 Just tested on Linux.
 

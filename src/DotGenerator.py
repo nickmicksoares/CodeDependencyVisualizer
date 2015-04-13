@@ -1,5 +1,6 @@
 import hashlib
 import logging
+#import pdb
 
 
 class UmlClass:
@@ -106,7 +107,51 @@ class DotGenerator:
     def setShowPubMethods(self, enable):
         self._showPubMembers = enable
 
+    # Find classes without relation
+    def _find_garbage(self, associations, inheritances):
+        to_be_eliminate = []
+        for class_to_probe in self.classes.itervalues():
+            classId = class_to_probe.getId()
+            is_in_association = any(classId in s for s in associations)
+            is_in_inheritance = any(classId in s for s in inheritances)
+            if not (is_in_association or is_in_inheritance):
+                to_be_eliminate.append(class_to_probe.getId())
+        return to_be_eliminate
+
+    def _eliminate_garbage(self, aClasses, garbage):
+        for element in garbage:
+            for index, value in aClasses.iteritems():
+                if value.getId() == element:
+                    aClasses.pop(index)
+                    break
+        return aClasses
+
+    def _filter_garbage(self, content, associations, inheritances):
+        # Find garbage
+        classes_to_eliminate = self._find_garbage(associations, inheritances)
+
+        # Eliminate garbage
+        content = self._eliminate_garbage(content, classes_to_eliminate)
+
+        return content
+
     def generate(self):
+
+        # associations
+        associations = ""
+        if self._drawAssociations:
+            for key, aClass in self.classes.iteritems():
+                associations += self._genAssociations(aClass)
+
+        # inheritances
+        inheritances = ""
+        if self._drawInheritances:
+            for key, aClass in self.classes.iteritems():
+                inheritances += self._genInheritances(aClass)
+
+        # Clean classes that has no relations
+        self.classes = self._filter_garbage(self.classes, associations.split('\n'), inheritances.split('\n'))
+
         dotContent = ("digraph dependencies {\n" +
                       "  fontname = \"Bitstream Vera Sans\"\n" +
                       "  fontsize = 8" +
@@ -124,25 +169,17 @@ class DotGenerator:
         for key, value in self.classes.iteritems():
             dotContent += self._genClass(value, self._showPubMembers, self._showProtMembers, self._showPrivMembers)
 
-        # associations
         if self._drawAssociations:
-            associations = ""
-            for key, aClass in self.classes.iteritems():
-                associations += self._genAssociations(aClass)
-
             if associations != "":
                 dotContent += ("\nedge [arrowhead = open]\n")
                 dotContent += associations
 
-        # inheritances
-        if self._drawInheritances:
-            inheritances = ""
-            for key, aClass in self.classes.iteritems():
-                inheritances += self._genInheritances(aClass)
 
+        if self._drawInheritances:
             if inheritances != "":
                 dotContent += ("\nedge [arrowhead = empty]\n")
                 dotContent += inheritances
 
         dotContent += "}\n"
+
         return dotContent
